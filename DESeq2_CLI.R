@@ -7,6 +7,7 @@ library(tidyverse)
 library(ggrepel)
 library(fs)
 library(argparse)
+library(purrr)
 
 today=Sys.Date()
 parser = ArgumentParser()
@@ -23,7 +24,7 @@ parser$add_argument('-p', '--path',
 args = parser$parse_args()
 if (args$organism == 'mouse' ) {
   library(org.Mm.eg.db)
-  annots = dir_ls(path = '/Users/Sammy/Desktop/', recurse = TRUE, glob = '*vM19.sqlite', type = 'file')
+  annots = dir_ls(path = '/Users/Sammy/Desktop/', recurse = TRUE, regexp = '*vM[0-9]{2}.sqlite', type = 'file')
   annots_filtered = annots[basename(annots) == 'gencode.vM19.sqlite']
   if (length(annots) == 0) {
     download.file("ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M19/gencode.vM19.annotation.gtf.gz", 
@@ -36,8 +37,14 @@ if (args$organism == 'mouse' ) {
 } 
 
 if (args$organism == 'human') {
-  
-  # TODO: repeat for human 
+  library(Org.Hs.eg.db)
+  annots = dir_ls(path = '/Users/Sammy/Desktop/', recurse = TRUE, regexp = 'vH[0-9]{2}.sqlite', type = 'file')
+  annots_filtered = annots[basename(annots) == 'gencode.vH36.sqlite']
+  if (length(annots) == 0) {
+    # TODO: get latest human gencode download
+  } else {
+    loadDb(annots[1])
+  }
 }
   
 # This will then create a deseq folder if it isn't already there
@@ -46,7 +53,7 @@ folders = dir()
 if (!('deseq' %in% folders)) {
   dir.create('deseq')
 }
-print(getwd())
+print('Current working directory is: ', getwd())
 
 # Give your current analysis a name. This will be used for the naming of output files
 analysis_name = args$analysis_name
@@ -57,30 +64,32 @@ res <- AnnotationDbi::select(txdb, k, "TXNAME", "GENEID") #for every gene, tell 
 tx2gene <- res[,2:1] #this will show a list that has one column with the transcript name, and another column with the corresponding geneID
 head(tx2gene)
 
-sampleInfo = read_csv(file = 'Deseq_CLI_test.csv', col_names = T) # Change to args$path
+sampleInfo = read_csv(file = 'Deseq_CLI_test.csv', col_names = T) %>% # Change to args$path
+  arrange(Comparator) 
 
 # This should then point to the quants folder located inside of the current experiment
 dir <- file.path("quants/")
 list.files(dir)
 samplenames <- list.files(dir) #this is the directory with my Salmon outputs and I wirte their names into a vector 
-samplenames
-samplenames_reorder <- samplenames[c(1:6)] #from the list of files, I select the ones I want for the untreated and LPs comparison (from the list of file names I selected above), and put them in the correct order
+print(samplenames)
+
+(summary_df = sampleInfo %>% 
+  group_by(Condition, Comparator) %>%
+  count())
+  
+Treatment = as_factor(sampleInfo$Condition)
+
+stopifnot(all(sampleInfo$Quant_file_name %in% samplenames))
+
+samplenames_reorder <- sampleInfo$Quant_file_name #from the list of files, I select the ones I want for the untreated and LPs comparison (from the list of file names I selected above), and put them in the correct order
 samplenames_reorder
 
-# for differential expression between control and one condition alone 
-samplenames_subset <- samplenames_reorder[c(1,3,4:6)] #from the list of files, I select the ones I want for the LPS alone and LPS-RMM comparison (from the list of file names I selected above), and put them in the correct order
-samplenames_subset
-#Write out the treatment conditions: (the levels tells the analysis which conditions to set as a control to compare to)
-#Treatment <- factor(c("Control", "Control", "Control", "Dot1Li_4h","Dot1Li_4h","Dot1Li_4h"), levels=c("Control","Dot1Li_4h"))
-#Alternatively can 'repeat' a name to avoid having to retype:
-Treatment <- factor(c(rep("Ctrl",2),rep("Gtf2iKO",3)), levels=c("Ctrl","Gtf2iKO"))
-Treatment
-colData <- data.frame(samplenames_subset, Treatment)
+colData <- data.frame(samplenames_reorder, Treatment)
 colData #this is a table that has the exact file names of the Salmon output, and the other columns are descriptors of the experimental design that will be important for the DESeq2 analysis later on
 
 #Now we can build a vector which points to our quantification files using this column of coldata. We use names to name this vector with the run IDs as well.
-files <- file.path(dir,colData$samplenames_subset,"quant.sf")
-names(files) <- colData$samplenames_subset
+files <- file.path(dir,colData$samplenames_reorder,"quant.sf")
+names(files) <- colData$samplenames_reorder
 head(files,12)
 
 #use Tximport to read in files correctly. dim gives dimension readout. Should be the number of lines and the number of samples
