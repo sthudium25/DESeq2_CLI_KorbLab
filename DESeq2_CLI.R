@@ -1,4 +1,5 @@
-library("DESeq2")
+suppressPackageStartupMessages( {
+library("DESeq2") 
 library("edgeR")
 library("tximport")
 library("readr")
@@ -7,16 +8,16 @@ library(tidyverse)
 library(ggrepel)
 library(fs)
 library(argparse)
-library(purrr)
+library(purrr) })
 
-today=Sys.Date()
+today=format(Sys.Date(),'%m%d%y') 
 parser = ArgumentParser()
 parser$add_argument('-o', '--organism', 
                     default='mouse', 
-                    type='str', 
+                    type='character', 
                     help='The organism from which your sequencing files originated [default %(default)s]')
 parser$add_argument('-a', '--analysis_name',
-                    default=sprintf('Deseq2_%Y%m%d', today),
+                    default=sprintf('Deseq2_%s', today),
                     help='A name for the analysis being run [default %(default)s')
 parser$add_argument('-p', '--path',
                     help="Full path to your Deseq template file")
@@ -32,7 +33,7 @@ if (args$organism == 'mouse' ) {
     txdb <- makeTxDbFromGFF("gencode.vM19.annotation.gtf.gz")
     saveDb(txdb_ms, file="/Users/Sammy/Desktop/gencode.vM19.sqlite")
   } else {
-    txdb_ms <- loadDb(annots[1]) 
+    txdb <- loadDb(annots[1]) 
   }
 } 
 
@@ -53,18 +54,16 @@ folders = dir()
 if (!('deseq' %in% folders)) {
   dir.create('deseq')
 }
-print('Current working directory is: ', getwd())
+paste0('Current working directory is: ', getwd())
 
 # Give your current analysis a name. This will be used for the naming of output files
 analysis_name = args$analysis_name
 
-columns(txdb)
 k <- keys(txdb, "GENEID")
 res <- AnnotationDbi::select(txdb, k, "TXNAME", "GENEID") #for every gene, tell me the transcripts that are associated with it
 tx2gene <- res[,2:1] #this will show a list that has one column with the transcript name, and another column with the corresponding geneID
-head(tx2gene)
 
-sampleInfo = read_csv(file = 'Deseq_CLI_test.csv', col_names = T) %>% # Change to args$path
+sampleInfo = read_csv(file = args$path, col_names = T) %>% # Change to args$path
   arrange(Comparator) 
 
 # This should then point to the quants folder located inside of the current experiment
@@ -77,31 +76,32 @@ print(samplenames)
   group_by(Condition, Comparator) %>%
   count())
   
-Treatment = as_factor(sampleInfo$Condition)
+treatment = as_factor(sampleInfo$Condition)
 
-stopifnot(all(sampleInfo$Quant_file_name %in% samplenames))
+if (!all(sampleInfo$Quant_file_name %in% samplenames)) {
+  paste0("At least one of the sample names provided in the template file are not present in the following location: ",
+         normalizePath('quants/'))
+  stop()
+}
 
 samplenames_reorder <- sampleInfo$Quant_file_name #from the list of files, I select the ones I want for the untreated and LPs comparison (from the list of file names I selected above), and put them in the correct order
-samplenames_reorder
 
-colData <- data.frame(samplenames_reorder, Treatment)
-colData #this is a table that has the exact file names of the Salmon output, and the other columns are descriptors of the experimental design that will be important for the DESeq2 analysis later on
+colData <- data.frame(samplenames_reorder, treatment)
+print(colData) #this is a table that has the exact file names of the Salmon output, and the other columns are descriptors of the experimental design that will be important for the DESeq2 analysis later on
+
+
 
 #Now we can build a vector which points to our quantification files using this column of coldata. We use names to name this vector with the run IDs as well.
 files <- file.path(dir,colData$samplenames_reorder,"quant.sf")
 names(files) <- colData$samplenames_reorder
-head(files,12)
 
 #use Tximport to read in files correctly. dim gives dimension readout. Should be the number of lines and the number of samples
 txi <- tximport(files, type="salmon", tx2gene=tx2gene_ms,  ignoreAfterBar = TRUE)
-dim(txi$abundance)
-dim(txi$counts)
-dim(txi$length)
 
 #Now, we will build a DESeqDataSet from the matrices in tx
 
-dds <- DESeqDataSetFromTximport(txi, colData, ~ Treatment)
-dds
+dds <- DESeqDataSetFromTximport(txi, colData, ~ treatment)
+
 #My favorite of these transformation is the vst, mostly because it is very fast, and provides transformed (nearly log-scale) data which is robust to many problems associated with log-transformed data (for more details, see the DESeq2 workflow or vignette ).
 #blind=FALSE refers to the fact that we will use the design in estimating the global scale of biological variability, but not directly in the transformation:
 vst <- vst(dds, blind=FALSE)
@@ -117,17 +117,22 @@ p1 = pca %>%
   ggplot(aes(x=PC1, y=PC2, color=group)) +
   geom_point() +
   geom_text_repel(aes(label=gsub("_1.*","",rownames(pca)))) +
-  ggtitle(sprintf('%s', analysis_name))
+  ggtitle(sprintf('%s PCA', analysis_name))
 dev.off()
 
-#We will chop off the version number of the gene IDs, so that we can better look up their annotation information later.
-#However, we have a few genes which would have duplicated gene IDs after chopping off the version number, so in order to proceed we have to also use make.unique to indicate that some genes are duplicated. (It might be worth looking into why we have multiple versions of genes with the same base ID coming from our annotation.)
-head(dds)
+# We will chop off the version number of the gene IDs, so that we can better look up their annotation information later.
+# However, we have a few genes which would have duplicated gene IDs after chopping off the version number, 
+# so in order to proceed we have to also use make.unique to indicate that some genes are duplicated. 
+# (It might be worth looking into why we have multiple versions of genes with the same base ID coming from our annotation.)
+
 table(duplicated(substr(rownames(dds),1,18)))
 rownames(dds) <- make.unique(substr(rownames(dds),1,18))
-head(dds)
 
-#Now we can run our differential expression pipeline. First, it is sometimes convenient to remove genes where all the samples have very small counts. It's less of an issue for the statistical methods, and mostly just wasted computation, as it is not possible for these genes to exhibit statistical significance for differential expression. Here we count how many genes (out of those with at least a single count) have 3 samples with a count of 10 or more:
+# Now we can run our differential expression pipeline. 
+# First, it is sometimes convenient to remove genes where all the samples have very small counts. 
+# It's less of an issue for the statistical methods, and mostly just wasted computation, 
+# as it is not possible for these genes to exhibit statistical significance for differential expression. 
+# Here we count how many genes (out of those with at least a single count) have 3 samples with a count of 1 or more:
 dds <- dds[rowSums(counts(dds)) > 0,]
 keep_dds <- rowSums(counts(dds) >= 1) >= 3
 table(keep_dds)
@@ -136,14 +141,9 @@ dds_over1 <- dds[keep_dds,] #filter them out
 dds_over1 <- DESeq(dds_over1)
 resultsNames(dds_over1)
 ResName <- resultsNames(dds_over1)
-ResName
 ResName_input <- ResName[2]
-ResName_input
 res_dds_over1 <- results(dds_over1, name = ResName_input)
 head(res_dds_over1)
-res_dds_over1.sort <- res_dds_over1[order(res_dds_over1$pvalue),]
-
-#plotMA(res_dds_over1, ylim=c(-5,5))
 
 summary(res_dds_over1)
 
@@ -167,7 +167,7 @@ res_dds_over1 <- as.data.frame(res_dds_over1)
 res_dds_over1 <- res_dds_over1[ ,c(7, 1:6)]
 
 write.csv((res_dds_over1),
-          file=sprintf("%s_DESeqRes.csv", analysis_name))
+          file=sprintf("deseq/%s_DESeqRes.csv", analysis_name))
 
 # Generate DEG lists
 signif = res_dds_over1 %>%
@@ -181,13 +181,13 @@ up = signif %>%
   filter(log2FoldChange > 0,
          GeneSymbol != 'NA')
 
-write_tsv(as_tibble(rownames(down)), file = sprintf("%s_down_ensembl.txt", analysis_name),
+write_tsv(as_tibble(rownames(down)), file = sprintf("deseq/%s_down_ensembl.txt", analysis_name),
           col_names = F)
-write_tsv(as_tibble(rownames(up)), file = sprintf("%s_up_ensembl.txt", analysis_name),
+write_tsv(as_tibble(rownames(up)), file = sprintf("deseq/%s_up_ensembl.txt", analysis_name),
           col_names = F)
-write_tsv(as_tibble(down$GeneSymbol), file = sprintf("%s_down_geneSymbol.txt", analysis_name),
+write_tsv(as_tibble(down$GeneSymbol), file = sprintf("deseq/%s_down_geneSymbol.txt", analysis_name),
           col_names = F)
-write_tsv(as_tibble(up$GeneSymbol), file = sprintf("%s_up_geneSymbol.txt", analysis_name),
+write_tsv(as_tibble(up$GeneSymbol), file = sprintf("deseq/%s_up_geneSymbol.txt", analysis_name),
           col_names = F)
 
 res_dds_over1 %>%
