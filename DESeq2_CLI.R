@@ -1,14 +1,6 @@
-suppressPackageStartupMessages( {
-library("DESeq2") 
-library("edgeR")
-library("tximport")
-library("readr")
-library(GenomicFeatures)
-library(tidyverse)
-library(ggrepel)
-library(fs)
-library(argparse)
-library(purrr) })
+packages = c('edgeR', 'DESeq2', 'tximport', 'readr', 'GenomicFeatures', 'tidyverse', 'ggrepel', 'fs', 'argparse', 'purrr', 'readxl')
+
+suppressPackageStartupMessages(invisible(lapply(packages, library, character.only=T)))
 
 today=format(Sys.Date(),'%m%d%y') 
 parser = ArgumentParser()
@@ -19,19 +11,21 @@ parser$add_argument('-o', '--organism',
 parser$add_argument('-a', '--analysis_name',
                     default=sprintf('Deseq2_%s', today),
                     help='A name for the analysis being run [default %(default)s')
-parser$add_argument('-p', '--path',
-                    help="Full path to your Deseq template file")
+parser$add_argument('-t', '--template_path',
+                    help="Relative path to your Deseq template file")
+parser$add_argument('-q', '--quants_path',
+                    help="Relative path to the quants folder containing your samples")
 
 args = parser$parse_args()
 if (args$organism == 'mouse' ) {
   library(org.Mm.eg.db)
-  annots = dir_ls(path = '/Users/Sammy/Desktop/', recurse = TRUE, regexp = '*vM[0-9]{2}.sqlite', type = 'file')
+  annots = as.character(dir_ls(path = '/Users/korblab/gencodeFiles/', recurse = TRUE, regexp = '*vM[0-9]{2}.sqlite', type = 'file'))
   annots_filtered = annots[basename(annots) == 'gencode.vM19.sqlite']
   if (length(annots) == 0) {
     download.file("ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M19/gencode.vM19.annotation.gtf.gz", 
                   "gencode.vM19.annotation.gtf.gz")
     txdb <- makeTxDbFromGFF("gencode.vM19.annotation.gtf.gz")
-    saveDb(txdb_ms, file="/Users/Sammy/Desktop/gencode.vM19.sqlite")
+    saveDb(txdb_ms, file="/Users/korblab/gencodeFiles/gencode.vM19.sqlite")
   } else {
     txdb <- loadDb(annots[1]) 
   }
@@ -39,15 +33,18 @@ if (args$organism == 'mouse' ) {
 
 if (args$organism == 'human') {
   library(Org.Hs.eg.db)
-  annots = dir_ls(path = '/Users/Sammy/Desktop/', recurse = TRUE, regexp = 'vH[0-9]{2}.sqlite', type = 'file')
-  annots_filtered = annots[basename(annots) == 'gencode.vH36.sqlite']
+  annots = as.character(dir_ls(path = '/Users/korblab/gencodeFiles/', recurse = TRUE, regexp = 'v[0-9]{2}.sqlite', type = 'file'))
+  annots_filtered = annots[basename(annots) == 'gencode.v19.sqlite']
   if (length(annots) == 0) {
-    # TODO: get latest human gencode download
+    download.file("ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_19/gencode.v19.annotation.gtf.gz", 
+                  "gencode.v19.annotation.gtf.gz")
+    txdb <- makeTxDbFromGFF("gencode.v19.annotation.gtf.gz")
+    saveDb(txdb, file="/Users/korblab/gencodeFiles/gencode.v19.sqlite")
   } else {
-    loadDb(annots[1])
+    txbd = loadDb(annots[1])
   }
 }
-  
+
 # This will then create a deseq folder if it isn't already there
 
 folders = dir()
@@ -63,61 +60,67 @@ k <- keys(txdb, "GENEID")
 res <- AnnotationDbi::select(txdb, k, "TXNAME", "GENEID") #for every gene, tell me the transcripts that are associated with it
 tx2gene <- res[,2:1] #this will show a list that has one column with the transcript name, and another column with the corresponding geneID
 
-sampleInfo = read_csv(file = args$path, col_names = T) %>% # Change to args$path
-  arrange(Comparator) 
+sampleInfo = read_xlsx(path = args$template_path, col_names = T) %>% 
+  arrange(Comparison_level) 
+
+if (length(levels(as_factor(sampleInfo$Comparison_level))) == 1 ) {
+  print('Analysis must be performed between at least 2 levels. This comparison only has 1.')
+  stop()
+}
 
 # This should then point to the quants folder located inside of the current experiment
-dir <- file.path("quants/")
-list.files(dir)
+dir <- file.path(args$quants_path)
 samplenames <- list.files(dir) #this is the directory with my Salmon outputs and I wirte their names into a vector 
-print(samplenames)
 
+print("The samples to be analyzed are:")
 (summary_df = sampleInfo %>% 
-  group_by(Condition, Comparator) %>%
-  count())
-  
+    group_by(Condition, Comparison_level) %>%
+    count())
+
 treatment = as_factor(sampleInfo$Condition)
 
 if (!all(sampleInfo$Quant_file_name %in% samplenames)) {
-  paste0("At least one of the sample names provided in the template file are not present in the following location: ",
-         normalizePath('quants/'))
+  notPresent = list()
+  for (name in sampleInfo$Quant_file_name) {
+    if (!(name %in% samplenames)) {
+      notPresent = c(notPresent, name)
+    }
+  }
+  print(sprintf("The following sample names provided in the template file are not present in the following location: %s",
+                normalizePath(args$quants_path)))
+  for (file in notPresent) {
+    print(file)
+  }
   stop()
 }
 
 samplenames_reorder <- sampleInfo$Quant_file_name #from the list of files, I select the ones I want for the untreated and LPs comparison (from the list of file names I selected above), and put them in the correct order
 
+# TODO: write a makeColData() function generic to number of colData columns
 colData <- data.frame(samplenames_reorder, treatment)
 print(colData) #this is a table that has the exact file names of the Salmon output, and the other columns are descriptors of the experimental design that will be important for the DESeq2 analysis later on
-
-
 
 #Now we can build a vector which points to our quantification files using this column of coldata. We use names to name this vector with the run IDs as well.
 files <- file.path(dir,colData$samplenames_reorder,"quant.sf")
 names(files) <- colData$samplenames_reorder
 
 #use Tximport to read in files correctly. dim gives dimension readout. Should be the number of lines and the number of samples
-txi <- tximport(files, type="salmon", tx2gene=tx2gene_ms,  ignoreAfterBar = TRUE)
+txi <- tximport(files, type="salmon", tx2gene=tx2gene,  ignoreAfterBar = TRUE)
 
 #Now, we will build a DESeqDataSet from the matrices in tx
 
-dds <- DESeqDataSetFromTximport(txi, colData, ~ treatment)
+dds <- DESeqDataSetFromTximport(countData = txi, colData = colData, design = ~ treatment)
 
 #My favorite of these transformation is the vst, mostly because it is very fast, and provides transformed (nearly log-scale) data which is robust to many problems associated with log-transformed data (for more details, see the DESeq2 workflow or vignette ).
 #blind=FALSE refers to the fact that we will use the design in estimating the global scale of biological variability, but not directly in the transformation:
 vst <- vst(dds, blind=FALSE)
 pdf(sprintf('deseq/%s_PCA.pdf', analysis_name))
-p1 = plotPCA(vst, "Treatment")
+p1 = plotPCA(vst, "treatment")
 p1 + ggtitle(sprintf('%s', analysis_name))
 dev.off()
 
-pca = plotPCA(vst, "Treatment", returnData=TRUE)
-
-pdf(sprintf('%s_PCAlabeled.pdf', analysis_name))
-p1 = pca %>%
-  ggplot(aes(x=PC1, y=PC2, color=group)) +
-  geom_point() +
-  geom_text_repel(aes(label=gsub("_1.*","",rownames(pca)))) +
-  ggtitle(sprintf('%s PCA', analysis_name))
+pdf(sprintf('deseq/%s_PCAlabeled.pdf', analysis_name))
+p1 + geom_text_repel(aes(label=rownames(colData(vst))), show.legend = F)
 dev.off()
 
 # We will chop off the version number of the gene IDs, so that we can better look up their annotation information later.
@@ -156,7 +159,7 @@ gene_symbols <- mapIds(org.Mm.eg.db, keys = geneIDs, column = "SYMBOL", keytype 
 res_dds_over1$GeneSymbol <- gene_symbols
 
 #make volcano plot
-pdf(sprintf('%s_Volcano.pdf', analysis_name))
+pdf(sprintf('deseq/%s_Volcano.pdf', analysis_name))
 with(res_dds_over1, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-5,5)))
 # Add colored points: red if padj<0.05. (Other options are for orange of log2FC>1, green if both)
 with(subset(res_dds_over1, padj<.05 ), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
