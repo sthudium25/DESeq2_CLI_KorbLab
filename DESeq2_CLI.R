@@ -1,6 +1,16 @@
-packages = c('edgeR', 'DESeq2', 'tximport', 'readr', 'GenomicFeatures', 'tidyverse', 'ggrepel', 'fs', 'argparse', 'purrr', 'readxl')
+packages = c('edgeR', 'DESeq2', 'tximport', 'readr', 'GenomicFeatures', 
+             'tidyverse', 'ggrepel', 'fs', 'argparse', 'purrr', 'readxl')
 
 suppressPackageStartupMessages(invisible(lapply(packages, library, character.only=T)))
+
+make_col_data = function(inputDF, samples) {
+  tmp = inputDF %>%
+    select(-Quant_file_name, -Comparison_level)
+  out = cbind(samples, tmp)
+  out = column_to_rownames(out$samples)
+  out
+}
+
 
 today=format(Sys.Date(),'%m%d%y') 
 parser = ArgumentParser()
@@ -15,6 +25,9 @@ parser$add_argument('-t', '--template_path',
                     help="Relative path to your Deseq template file")
 parser$add_argument('-q', '--quants_path',
                     help="Relative path to the quants folder containing your samples")
+parser$add_argument('-s', '--significance_level',
+                    default=0.05,
+                    help='Set the desired significance level for this analysis; [default %(default)s')
 
 args = parser$parse_args()
 if (args$organism == 'mouse' ) {
@@ -69,7 +82,7 @@ if (length(levels(as_factor(sampleInfo$Comparison_level))) == 1 ) {
 }
 
 # This should then point to the quants folder located inside of the current experiment
-dir <- file.path(args$quants_path)
+dir <- file.path('quants/') #args$quants_path
 samplenames <- list.files(dir) #this is the directory with my Salmon outputs and I wirte their names into a vector 
 
 print("The samples to be analyzed are:")
@@ -77,7 +90,6 @@ print("The samples to be analyzed are:")
     group_by(Condition, Comparison_level) %>%
     count())
 
-treatment = as_factor(sampleInfo$Condition)
 
 if (!all(sampleInfo$Quant_file_name %in% samplenames)) {
   notPresent = list()
@@ -96,8 +108,7 @@ if (!all(sampleInfo$Quant_file_name %in% samplenames)) {
 
 samplenames_reorder <- sampleInfo$Quant_file_name #from the list of files, I select the ones I want for the untreated and LPs comparison (from the list of file names I selected above), and put them in the correct order
 
-# TODO: write a makeColData() function generic to number of colData columns
-colData <- data.frame(samplenames_reorder, treatment)
+colData <- makeColData(sampleInfo, samplenames_reorder)
 print(colData) #this is a table that has the exact file names of the Salmon output, and the other columns are descriptors of the experimental design that will be important for the DESeq2 analysis later on
 
 #Now we can build a vector which points to our quantification files using this column of coldata. We use names to name this vector with the run IDs as well.
@@ -109,13 +120,13 @@ txi <- tximport(files, type="salmon", tx2gene=tx2gene,  ignoreAfterBar = TRUE)
 
 #Now, we will build a DESeqDataSet from the matrices in tx
 
-dds <- DESeqDataSetFromTximport(countData = txi, colData = colData, design = ~ treatment)
+dds <- DESeqDataSetFromTximport(countData = txi, colData = colData, design = formula(paste0('~', colData)))
 
 #My favorite of these transformation is the vst, mostly because it is very fast, and provides transformed (nearly log-scale) data which is robust to many problems associated with log-transformed data (for more details, see the DESeq2 workflow or vignette ).
 #blind=FALSE refers to the fact that we will use the design in estimating the global scale of biological variability, but not directly in the transformation:
 vst <- vst(dds, blind=FALSE)
 pdf(sprintf('deseq/%s_PCA.pdf', analysis_name))
-p1 = plotPCA(vst, "treatment")
+p1 = plotPCA(vst, names(colData(dds)))
 p1 + ggtitle(sprintf('%s', analysis_name))
 dev.off()
 
@@ -137,18 +148,14 @@ rownames(dds) <- make.unique(substr(rownames(dds),1,18))
 # as it is not possible for these genes to exhibit statistical significance for differential expression. 
 # Here we count how many genes (out of those with at least a single count) have 3 samples with a count of 1 or more:
 dds <- dds[rowSums(counts(dds)) > 0,]
-keep_dds <- rowSums(counts(dds) >= 1) >= 3
-table(keep_dds)
+keep_dds <- rowSums(counts(dds) >= 1) >= 3 # TODO: The deseq tutorial shows 'count of 10 in three or more samples' not 1
 dds_over1 <- dds[keep_dds,] #filter them out
 
 dds_over1 <- DESeq(dds_over1)
-resultsNames(dds_over1)
 ResName <- resultsNames(dds_over1)
 ResName_input <- ResName[2]
 res_dds_over1 <- results(dds_over1, name = ResName_input)
 head(res_dds_over1)
-
-summary(res_dds_over1)
 
 #add gene names (symbols) to deseq results file
 #modify your deseq results (res) table to take off numbers after decimal point to allow for matching to this database, needed to install org.Mm.eg.db previously for this to work
@@ -162,7 +169,7 @@ res_dds_over1$GeneSymbol <- gene_symbols
 pdf(sprintf('deseq/%s_Volcano.pdf', analysis_name))
 with(res_dds_over1, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-5,5)))
 # Add colored points: red if padj<0.05. (Other options are for orange of log2FC>1, green if both)
-with(subset(res_dds_over1, padj<.05 ), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+with(subset(res_dds_over1, padj<args$significance_level ), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
 dev.off()
 #with(subset(res, abs(log2FoldChange)>1), points(log2FoldChange, -log10(pvalue), pch=20, col="orange"))
 #with(subset(res, padj<.05 & abs(log2FoldChange)>1), points(log2FoldChange, -log10(pvalue), pch=20, col="green"))
@@ -174,7 +181,7 @@ write.csv((res_dds_over1),
 
 # Generate DEG lists
 signif = res_dds_over1 %>%
-  filter(padj < 0.05)
+  filter(padj < args$significance_level)
 
 down = signif %>%
   filter(log2FoldChange < 0, 
@@ -203,8 +210,8 @@ background = res_dds_over1 %>%
   filter(baseMean > 5,
          GeneSymbol != 'NA') 
 
-write_tsv(as_tibble(rownames(background)), file = sprintf("%s_background_ensembl.txt", analysis_name),
+write_tsv(as_tibble(rownames(background)), file = sprintf("deseq/%s_background_ensembl.txt", analysis_name),
           col_names = F)
-write_tsv(as_tibble(background$GeneSymbol), file = sprintf("%s_background_geneSymbol.txt", analysis_name),
+write_tsv(as_tibble(background$GeneSymbol), file = sprintf("deseq/%s_background_geneSymbol.txt", analysis_name),
           col_names = F)
 
