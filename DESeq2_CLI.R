@@ -1,5 +1,5 @@
 packages = c('edgeR', 'DESeq2', 'tximport', 'readr', 'GenomicFeatures', 
-             'tidyverse', 'ggrepel', 'fs', 'argparse', 'purrr', 'readxl')
+             'tidyverse', 'ggrepel', 'fs', 'argparse', 'purrr', 'readxl', 'glue')
 
 suppressPackageStartupMessages(invisible(lapply(packages, library, character.only=T)))
 
@@ -19,7 +19,7 @@ parser$add_argument('-o', '--organism',
                     type='character', 
                     help='The organism from which your sequencing files originated [default %(default)s]')
 parser$add_argument('-a', '--analysis_name',
-                    default=sprintf('Deseq2_%s', today),
+                    default=sprintf('Deseq2_analysis_%s', today),
                     help='A name for the analysis being run [default %(default)s')
 parser$add_argument('-t', '--template_path',
                     help="Relative path to your Deseq template file")
@@ -59,15 +59,15 @@ if (args$organism == 'human') {
 }
 
 # This will then create a deseq folder if it isn't already there
-
-folders = dir()
-if (!('deseq' %in% folders)) {
-  dir.create('deseq')
-}
-paste0('Current working directory is: ', getwd())
-
 # Give your current analysis a name. This will be used for the naming of output files
 analysis_name = args$analysis_name
+
+folders = dir()
+if (!(glue('deseq_{analysis_name}') %in% folders)) {
+ # dir.create(sprintf('deseq_%s', analysis_name))
+  dir.create(glue('deseq_{analysis_name}'))
+}
+paste0('Current working directory is: ', getwd())
 
 k <- keys(txdb, "GENEID")
 res <- AnnotationDbi::select(txdb, k, "TXNAME", "GENEID") #for every gene, tell me the transcripts that are associated with it
@@ -118,19 +118,20 @@ names(files) <- colData$samplenames_reorder
 #use Tximport to read in files correctly. dim gives dimension readout. Should be the number of lines and the number of samples
 txi <- tximport(files, type="salmon", tx2gene=tx2gene,  ignoreAfterBar = TRUE)
 
+write_csv(as_tibble(txi$counts), file=glue('deseq_{analysis_name}/{analysis_name}_countsMatrix.csv'), col_names=T)
 #Now, we will build a DESeqDataSet from the matrices in tx
 
-dds <- DESeqDataSetFromTximport(countData = txi, colData = colData, design = formula(paste0('~', colData)))
+dds <- DESeqDataSetFromTximport(txi = txi, colData = colData, design = formula(paste0('~', colData)))
 
 #My favorite of these transformation is the vst, mostly because it is very fast, and provides transformed (nearly log-scale) data which is robust to many problems associated with log-transformed data (for more details, see the DESeq2 workflow or vignette ).
 #blind=FALSE refers to the fact that we will use the design in estimating the global scale of biological variability, but not directly in the transformation:
 vst <- vst(dds, blind=FALSE)
-pdf(sprintf('deseq/%s_PCA.pdf', analysis_name))
+pdf(glue('deseq_{analysis_name}/{analysis_name}_PCA.pdf'))
 p1 = plotPCA(vst, names(colData(dds)))
 p1 + ggtitle(sprintf('%s', analysis_name))
 dev.off()
 
-pdf(sprintf('deseq/%s_PCAlabeled.pdf', analysis_name))
+pdf(glue('deseq_{analysis_name}/{analysis_name}_PCAlabeled.pdf'))
 p1 + geom_text_repel(aes(label=rownames(colData(vst))), show.legend = F)
 dev.off()
 
@@ -161,12 +162,14 @@ head(res_dds_over1)
 #modify your deseq results (res) table to take off numbers after decimal point to allow for matching to this database, needed to install org.Mm.eg.db previously for this to work
 geneIDs <- substr(rownames(res_dds_over1), 1, 18)
 # running mapIDs: collect gene symbols for the ensembl names in your geneID list
+
+# TODO: make this map ids section general to the organism selected by user
 gene_symbols <- mapIds(org.Mm.eg.db, keys = geneIDs, column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
 #add gene symbols as a new column to your res file
 res_dds_over1$GeneSymbol <- gene_symbols
 
 #make volcano plot
-pdf(sprintf('deseq/%s_Volcano.pdf', analysis_name))
+pdf(glue('deseq_{analysis_name}/{analysis_name}_Volcano.pdf'))
 with(res_dds_over1, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-5,5)))
 # Add colored points: red if padj<0.05. (Other options are for orange of log2FC>1, green if both)
 with(subset(res_dds_over1, padj<args$significance_level ), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
@@ -177,7 +180,7 @@ res_dds_over1 <- as.data.frame(res_dds_over1)
 res_dds_over1 <- res_dds_over1[ ,c(7, 1:6)]
 
 write.csv((res_dds_over1),
-          file=sprintf("deseq/%s_DESeqRes.csv", analysis_name))
+          file=glue('deseq_{analysis_name}/{analysis_name}_DESeqRes.csv'))
 
 # Generate DEG lists
 signif = res_dds_over1 %>%
@@ -191,27 +194,22 @@ up = signif %>%
   filter(log2FoldChange > 0,
          GeneSymbol != 'NA')
 
-write_tsv(as_tibble(rownames(down)), file = sprintf("deseq/%s_down_ensembl.txt", analysis_name),
+write_tsv(as_tibble(rownames(down)), file = glue('deseq_{analysis_name}/{analysis_name}_down_ensembl.txt'),
           col_names = F)
-write_tsv(as_tibble(rownames(up)), file = sprintf("deseq/%s_up_ensembl.txt", analysis_name),
+write_tsv(as_tibble(rownames(up)), file = glue('deseq_{analysis_name}/{analysis_name}_up_ensembl.txt'),
           col_names = F)
-write_tsv(as_tibble(down$GeneSymbol), file = sprintf("deseq/%s_down_geneSymbol.txt", analysis_name),
+write_tsv(as_tibble(down$GeneSymbol), file = glue('deseq_{analysis_name}/{analysis_name}_down_geneSymbol.txt'),
           col_names = F)
-write_tsv(as_tibble(up$GeneSymbol), file = sprintf("deseq/%s_up_geneSymbol.txt", analysis_name),
+write_tsv(as_tibble(up$GeneSymbol), file = glue('deseq_{analysis_name}/{analysis_name}_up_geneSymbol.txt'),
           col_names = F)
-
-res_dds_over1 %>%
-  ggplot(aes(x=baseMean)) + 
-  geom_histogram(binwidth = 1) +
-  xlim(0,100)
 
 # Generate background list
 background = res_dds_over1 %>%
   filter(baseMean > 5,
          GeneSymbol != 'NA') 
 
-write_tsv(as_tibble(rownames(background)), file = sprintf("deseq/%s_background_ensembl.txt", analysis_name),
+write_tsv(as_tibble(rownames(background)), file = glue('deseq_{analysis_name}/{analysis_name}_background_ensembl.txt'),
           col_names = F)
-write_tsv(as_tibble(background$GeneSymbol), file = sprintf("deseq/%s_background_geneSymbol.txt", analysis_name),
+write_tsv(as_tibble(background$GeneSymbol), file = glue('deseq_{analysis_name}/{analysis_name}_background_geneSymbol.txt'),
           col_names = F)
 
