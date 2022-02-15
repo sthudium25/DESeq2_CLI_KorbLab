@@ -1,4 +1,4 @@
-packages = c('edgeR', 'DESeq2', 'tximport', 'readr', 'GenomicFeatures', 
+packages = c('edgeR', 'DESeq2', 'tximport', 'readr', 'GenomicFeatures', 'magrittr', 
              'tidyverse', 'ggrepel', 'fs', 'argparse', 'purrr', 'readxl', 'glue')
 
 suppressPackageStartupMessages(invisible(lapply(packages, library, character.only=T)))
@@ -32,6 +32,7 @@ parser$add_argument('-s', '--significance_level',
 args = parser$parse_args()
 if (args$organism == 'mouse' ) {
   library(org.Mm.eg.db)
+  annotation_pkg = org.Mm.eg.db
   annots = as.character(dir_ls(path = '/Users/korblab/gencodeFiles/', recurse = TRUE, regexp = '*vM[0-9]{2}.sqlite', type = 'file'))
   annots_filtered = annots[basename(annots) == 'gencode.vM19.sqlite']
   if (length(annots) == 0) {
@@ -46,6 +47,7 @@ if (args$organism == 'mouse' ) {
 
 if (args$organism == 'human') {
   library(Org.Hs.eg.db)
+  annotation_pkg = Org.Hs.eg.db
   annots = as.character(dir_ls(path = '/Users/korblab/gencodeFiles/', recurse = TRUE, regexp = 'v[0-9]{2}.sqlite', type = 'file'))
   annots_filtered = annots[basename(annots) == 'gencode.v19.sqlite']
   if (length(annots) == 0) {
@@ -63,9 +65,9 @@ if (args$organism == 'human') {
 analysis_name = args$analysis_name
 
 folders = dir()
-if (!(glue('deseq_{analysis_name}') %in% folders)) {
+if (!(analysis_name %in% folders)) {
  # dir.create(sprintf('deseq_%s', analysis_name))
-  dir.create(glue('deseq_{analysis_name}'))
+  dir.create(analysis_name)
 }
 paste0('Current working directory is: ', getwd())
 
@@ -108,7 +110,7 @@ if (!all(sampleInfo$Quant_file_name %in% samplenames)) {
 
 samplenames_reorder <- sampleInfo$Quant_file_name #from the list of files, I select the ones I want for the untreated and LPs comparison (from the list of file names I selected above), and put them in the correct order
 
-colData <- makeColData(sampleInfo, samplenames_reorder)
+colData <- makeColData(sampleInfo, samplenames_reorder) 
 print(colData) #this is a table that has the exact file names of the Salmon output, and the other columns are descriptors of the experimental design that will be important for the DESeq2 analysis later on
 
 #Now we can build a vector which points to our quantification files using this column of coldata. We use names to name this vector with the run IDs as well.
@@ -118,7 +120,7 @@ names(files) <- colData$samplenames_reorder
 #use Tximport to read in files correctly. dim gives dimension readout. Should be the number of lines and the number of samples
 txi <- tximport(files, type="salmon", tx2gene=tx2gene,  ignoreAfterBar = TRUE)
 
-write_csv(as_tibble(txi$counts), file=glue('deseq_{analysis_name}/{analysis_name}_countsMatrix.csv'), col_names=T)
+write_csv(as_tibble(txi$counts), file=glue('{analysis_name}/{analysis_name}_countsMatrix.csv'), col_names=T)
 #Now, we will build a DESeqDataSet from the matrices in tx
 
 dds <- DESeqDataSetFromTximport(txi = txi, colData = colData, design = formula(paste0('~', colData)))
@@ -126,12 +128,12 @@ dds <- DESeqDataSetFromTximport(txi = txi, colData = colData, design = formula(p
 #My favorite of these transformation is the vst, mostly because it is very fast, and provides transformed (nearly log-scale) data which is robust to many problems associated with log-transformed data (for more details, see the DESeq2 workflow or vignette ).
 #blind=FALSE refers to the fact that we will use the design in estimating the global scale of biological variability, but not directly in the transformation:
 vst <- vst(dds, blind=FALSE)
-pdf(glue('deseq_{analysis_name}/{analysis_name}_PCA.pdf'))
+pdf(glue('{analysis_name}/{analysis_name}_PCA.pdf'))
 p1 = plotPCA(vst, names(colData(dds)))
 p1 + ggtitle(sprintf('%s', analysis_name))
 dev.off()
 
-pdf(glue('deseq_{analysis_name}/{analysis_name}_PCAlabeled.pdf'))
+pdf(glue('{analysis_name}/{analysis_name}_PCAlabeled.pdf'))
 p1 + geom_text_repel(aes(label=rownames(colData(vst))), show.legend = F)
 dev.off()
 
@@ -164,12 +166,12 @@ geneIDs <- substr(rownames(res_dds_over1), 1, 18)
 # running mapIDs: collect gene symbols for the ensembl names in your geneID list
 
 # TODO: make this map ids section general to the organism selected by user
-gene_symbols <- mapIds(org.Mm.eg.db, keys = geneIDs, column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+gene_symbols <- mapIds(annotation_pkg, keys = geneIDs, column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
 #add gene symbols as a new column to your res file
 res_dds_over1$GeneSymbol <- gene_symbols
 
 #make volcano plot
-pdf(glue('deseq_{analysis_name}/{analysis_name}_Volcano.pdf'))
+pdf(glue('{analysis_name}/{analysis_name}_Volcano.pdf'))
 with(res_dds_over1, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-5,5)))
 # Add colored points: red if padj<0.05. (Other options are for orange of log2FC>1, green if both)
 with(subset(res_dds_over1, padj<args$significance_level ), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
@@ -180,7 +182,7 @@ res_dds_over1 <- as.data.frame(res_dds_over1)
 res_dds_over1 <- res_dds_over1[ ,c(7, 1:6)]
 
 write.csv((res_dds_over1),
-          file=glue('deseq_{analysis_name}/{analysis_name}_DESeqRes.csv'))
+          file=glue('{analysis_name}/{analysis_name}_DESeqRes.csv'))
 
 # Generate DEG lists
 signif = res_dds_over1 %>%
@@ -194,13 +196,13 @@ up = signif %>%
   filter(log2FoldChange > 0,
          GeneSymbol != 'NA')
 
-write_tsv(as_tibble(rownames(down)), file = glue('deseq_{analysis_name}/{analysis_name}_down_ensembl.txt'),
+write_tsv(as_tibble(rownames(down)), file = glue('{analysis_name}/{analysis_name}_down_ensembl.txt'),
           col_names = F)
-write_tsv(as_tibble(rownames(up)), file = glue('deseq_{analysis_name}/{analysis_name}_up_ensembl.txt'),
+write_tsv(as_tibble(rownames(up)), file = glue('{analysis_name}/{analysis_name}_up_ensembl.txt'),
           col_names = F)
-write_tsv(as_tibble(down$GeneSymbol), file = glue('deseq_{analysis_name}/{analysis_name}_down_geneSymbol.txt'),
+write_tsv(as_tibble(down$GeneSymbol), file = glue('{analysis_name}/{analysis_name}_down_geneSymbol.txt'),
           col_names = F)
-write_tsv(as_tibble(up$GeneSymbol), file = glue('deseq_{analysis_name}/{analysis_name}_up_geneSymbol.txt'),
+write_tsv(as_tibble(up$GeneSymbol), file = glue('{analysis_name}/{analysis_name}_up_geneSymbol.txt'),
           col_names = F)
 
 # Generate background list
@@ -208,8 +210,8 @@ background = res_dds_over1 %>%
   filter(baseMean > 5,
          GeneSymbol != 'NA') 
 
-write_tsv(as_tibble(rownames(background)), file = glue('deseq_{analysis_name}/{analysis_name}_background_ensembl.txt'),
+write_tsv(as_tibble(rownames(background)), file = glue('{analysis_name}/{analysis_name}_background_ensembl.txt'),
           col_names = F)
-write_tsv(as_tibble(background$GeneSymbol), file = glue('deseq_{analysis_name}/{analysis_name}_background_geneSymbol.txt'),
+write_tsv(as_tibble(background$GeneSymbol), file = glue('{analysis_name}/{analysis_name}_background_geneSymbol.txt'),
           col_names = F)
 
